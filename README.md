@@ -1,87 +1,67 @@
-# FIFO RTL + Cocotb Verification
+# Synchronous FIFO with a cocotb testbench
 
-This project implements a parameterized synchronous FIFO in Verilog and verifies it with a Cocotb-based Python testbench. It is designed as a compact RTL verification portfolio project covering RTL design, randomized testing, scoreboard checking, and CI regression.
+A parameterized single-clock FIFO in Verilog, verified with a Python testbench
+written in cocotb and simulated with Icarus Verilog. Regression runs on every
+push through GitHub Actions.
 
-## Features
+## RTL
 
-- Parameterized Verilog FIFO with configurable data width and depth
-- Status flags: `empty`, `full`, and `almost_full`
-- Cocotb driver, monitor, and scoreboard
-- Directed tests for reset, fill, drain, almost-full threshold, overflow protection, and simultaneous read/write
-- Randomized regression with a Python reference model
-- GitHub Actions workflow for automatic regression
+`rtl/sync_fifo.v`
 
-## Architecture
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `DATA_WIDTH` | 8 | Width of each entry |
+| `DEPTH` | 16 | Number of entries |
+| `ALMOST_FULL_THRESHOLD` | `DEPTH - 2` | `almost_full` is high when occupancy >= this value |
 
-The FIFO uses a single clock, active-low asynchronous reset, circular read/write pointers, and an occupancy counter. Writes are accepted when the FIFO is not full, or when a valid read occurs in the same cycle. Reads are accepted when the FIFO is not empty.
+Implementation notes:
 
-```text
-        wr_en/din                dout/flags
-    +-------------+           +-------------+
-    | Cocotb      |           | Cocotb      |
-    | Driver      |---------->| Monitor     |
-    +-------------+           +-------------+
-            |                         |
-            v                         v
-    +-----------------------------------------+
-    |            Verilog sync_fifo            |
-    +-----------------------------------------+
-            |                         |
-            v                         v
-    +-----------------------------------------+
-    |      Python reference model + scoreboard |
-    +-----------------------------------------+
-```
+- Circular read/write pointers plus an occupancy counter. `empty`, `full` and
+  `almost_full` are decoded from the counter, so there is no extra pointer
+  wrap bit.
+- Active-low asynchronous reset.
+- `dout` is registered: data appears on the cycle after a read is accepted, and
+  holds its last value when no read happens.
+- A write while `full` is dropped, unless a read is accepted in the same cycle;
+  in that case both happen and the occupancy stays at `DEPTH`.
+- A read while `empty` is ignored.
 
-## Repository Layout
+## Testbench
 
-```text
-.
-+-- rtl/
-|   +-- sync_fifo.v
-+-- tests/
-|   +-- Makefile
-|   +-- test_sync_fifo.py
-+-- .github/workflows/
-|   +-- regression.yml
-+-- requirements.txt
-+-- README.md
-```
+`tests/test_sync_fifo.py`
 
-## Run Locally
+The testbench is split into a driver (drives `wr_en`/`rd_en`/`din` for one
+cycle), a monitor (samples `dout` and the flags) and a scoreboard that keeps a
+`collections.deque` as the reference model. After every cycle the scoreboard
+checks the read data and all three flags against the model.
 
-Install Icarus Verilog first, then run:
+| Test | What it checks |
+| --- | --- |
+| `reset_flags_are_clean` | Flags and `dout` after reset |
+| `fill_and_drain_in_order` | Fill to `full`, one extra write is dropped, drain in FIFO order |
+| `almost_full_threshold` | `almost_full` rises exactly at the threshold |
+| `simultaneous_read_write_keeps_order` | Read and write in the same cycle keep order and occupancy |
+| `randomized_regression` | 1000 cycles of random read/write traffic (fixed seed) |
+
+## Running
+
+Requires Icarus Verilog and Python 3.
 
 ```bash
 pip install -r requirements.txt
 cd tests
-make
+make            # run all tests
+make WAVES=1    # also dump waveforms
 ```
 
-To view waveforms, run with tracing enabled:
+The CI workflow in `.github/workflows/regression.yml` runs the same `make` on
+Ubuntu.
 
-```bash
-cd tests
-make WAVES=1
-```
+## Known limitations
 
-## Verification Scenarios
-
-- Reset initializes flags and output state
-- FIFO fills to `full` without losing data
-- Extra writes while full do not corrupt stored entries
-- FIFO drains in first-in, first-out order
-- `almost_full` asserts at the configured threshold
-- Simultaneous read/write preserves ordering and occupancy
-- Randomized read/write traffic is checked against a Python `deque` reference model
-
-## Resume Keywords
-
-`RTL`, `Verilog`, `Python`, `Cocotb`, `testbench`, `driver`, `monitor`, `scoreboard`, `random regression`, `GitHub Actions`
-
-## Interview Talking Points
-
-- The FIFO is implemented with circular pointers plus a count register, making `empty`, `full`, and `almost_full` straightforward to derive.
-- The Cocotb testbench mirrors UVM-style structure with a driver, monitor, and scoreboard, but keeps the implementation lightweight in Python.
-- The scoreboard acts as the golden model and catches ordering, overflow, underflow, and simultaneous read/write bugs.
-- CI regression makes the project reproducible and demonstrates verification automation rather than one-off simulation.
+- Only the default configuration (8-bit, 16 deep, threshold 14) is simulated.
+  The test file hard-codes these values, so they must match the `-P` overrides
+  in `tests/Makefile`.
+- The random test uses one fixed seed; there is no seed sweep or functional
+  coverage collection yet.
+- No SystemVerilog assertions on the RTL side.
